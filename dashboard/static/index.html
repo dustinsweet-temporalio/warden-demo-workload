@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Warden demo control surface</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1d212b; --line: #2a2f3a;
+    --text: #e6e8ee; --muted: #9aa3b2; --green: #35c46b; --amber: #e5a13a;
+    --red: #e5484d; --accent: #4c8bf5;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 16px 22px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .strip { margin-left: auto; display: flex; gap: 18px; align-items: center; color: var(--muted); font-size: 13px; }
+  .strip b { color: var(--text); }
+  .reset { background: var(--red); color: #fff; border: 0; padding: 9px 16px;
+    border-radius: 8px; font-weight: 600; cursor: pointer; }
+  main { padding: 20px 22px; max-width: 1080px; margin: 0 auto; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 26px 0 10px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .card.on { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber) inset; }
+  .card-head { display: flex; align-items: center; gap: 10px; }
+  .card-head .title { font-weight: 600; }
+  .tag { font-size: 10px; padding: 2px 7px; border-radius: 999px; background: var(--panel2);
+    color: var(--muted); border: 1px solid var(--line); }
+  .tag.primary { color: var(--accent); border-color: var(--accent); }
+  .desc { color: var(--muted); margin: 8px 0 12px; min-height: 34px; }
+  .finding { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .finding b { color: var(--text); }
+  .row { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+  label { color: var(--muted); font-size: 12px; }
+  input[type=range] { flex: 1; }
+  input[type=number], select { background: var(--panel2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  .switch { margin-left: auto; }
+  button.act { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    padding: 7px 12px; border-radius: 7px; cursor: pointer; }
+  button.act:hover { border-color: var(--accent); }
+  .toggle { position: relative; width: 44px; height: 24px; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; background: #3a3f4b; border-radius: 999px; transition: .15s; }
+  .slider:before { content: ""; position: absolute; height: 18px; width: 18px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: .15s; }
+  input:checked + .slider { background: var(--green); }
+  input:checked + .slider:before { transform: translateX(20px); }
+  .workers { display: flex; gap: 8px; flex-wrap: wrap; }
+  .worker { display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; padding: 8px 10px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); }
+  .dot.stopped { background: var(--red); }
+  .pill { font-size: 12px; color: var(--muted); }
+  .val { color: var(--text); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Warden demo · operator control surface</h1>
+  <div class="strip">
+    <span>est. APS <b id="aps">--</b></span>
+    <span>active <b id="active">0</b></span>
+    <button class="reset" onclick="resetAll()">RESET to green</button>
+  </div>
+</header>
+
+<main>
+  <h2>Recommended demo path</h2>
+  <div class="grid" id="primary"></div>
+
+  <h2>Secondary &amp; optional</h2>
+  <div class="grid" id="secondary"></div>
+
+  <h2>One-shot actions</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="card-head"><span class="title">Terminate dispatch entities</span><span class="tag">S6</span></div>
+      <div class="desc">Sloppy terminate instead of continue-as-new. Fires
+        <b>terminate_without_continue_as_new</b> on DispatchWorkflow. The generator restarts them.</div>
+      <div class="row">
+        <label>count</label>
+        <input type="number" id="term-count" value="2" min="1" max="5" style="width:70px" />
+        <button class="act" onclick="terminate()">Terminate</button>
+      </div>
+    </div>
+  </div>
+
+  <h2>Worker fleet (S7 · no pollers)</h2>
+  <div class="workers" id="workers"></div>
+</main>
+
+<script>
+const SCENARIOS = [
+  { key: "retry_storm", group: "primary", tag: "S1 · PRIMARY", title: "Retry storm on flaky payments",
+    desc: "A downstream team's payment step starts failing and retrying about once a second. APS runs away with no code change on your side.",
+    finding: "activity_failure_ratio on OrderWorkflow (amber ≥0.30, red ≥0.70) + billable_action_count anomaly. Total APS ~20-25.",
+    controls: [ { type: "range", param: "failure_probability", label: "failure prob", min: 0, max: 1, step: 0.05, def: 0.6 } ] },
+
+  { key: "entity_history", group: "primary", tag: "S2 · PRIMARY", title: "Running entity history grows unbounded",
+    desc: "A team's long-running dispatch workflow stops calling continue-as-new and its history balloons. You need to see it before it closes.",
+    finding: "running_overlong_history on DispatchWorkflow (amber >2000 events, red ≥6000) while still running. Drill-down shows the hogging region.",
+    controls: [
+      { type: "select", param: "region", label: "region", options: ["us-west","us-east","midwest","south","northeast"], def: "us-west" },
+      { type: "number", param: "inflate_rate", label: "events/s", min: 5, max: 200, def: 40 } ] },
+
+  { key: "close_history_bloat", group: "secondary", tag: "S3", title: "Overlong history on a workflow that closes",
+    desc: "A batch loops sequentially over a big list with no continue-as-new and closes with a huge history.",
+    finding: "overlong_history on BatchAssignmentWorkflow (closed executions with HistoryLength > 2000).",
+    controls: [ { type: "number", param: "iterations", label: "iterations", min: 100, max: 2000, def: 700 } ] },
+
+  { key: "workflow_failure", group: "secondary", tag: "S4", title: "Workflow failure spike",
+    desc: "A fraction of a team's orders fail terminally at the restaurant step.",
+    finding: "workflow_failure_ratio on OrderWorkflow (amber ≥0.30, red ≥0.70).",
+    controls: [ { type: "range", param: "failure_probability", label: "failure prob", min: 0, max: 1, step: 0.05, def: 0.4 } ] },
+
+  { key: "timeout_spike", group: "secondary", tag: "S5", title: "Timeout spike",
+    desc: "A fraction of orders exceed a short execution timeout.",
+    finding: "elevated_timeout_rate on OrderWorkflow (workflow_timeout rate ≥0.02/s).",
+    controls: [ { type: "range", param: "probability", label: "timeout prob", min: 0, max: 1, step: 0.05, def: 0.5 } ] },
+
+  { key: "fanout_storm", group: "secondary", tag: "S8 · OPTIONAL", title: "Runaway fan-out APS",
+    desc: "A surge batch fans out to a very large number of children, spiking APS hard. May trip resource_exhausted if the namespace APS limit is lowered.",
+    finding: "billable_action_count anomaly on BatchAssignmentWorkflow (+ resource_exhausted, namespace, if throttled).",
+    controls: [ { type: "number", param: "children", label: "children", min: 20, max: 1000, def: 400 } ] },
+];
+
+const QUEUES = ["order-tq","dispatch-tq","courier-tq","batch-tq","settlement-tq","menu-tq","control-tq"];
+let state = {};
+
+async function api(path, method="GET", body) {
+  const opts = { method, headers: { "Content-Type": "application/json" } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  return r.json();
+}
+
+function paramValue(key, param, def) {
+  const s = state[key];
+  if (s && s.params && s.params[param] !== undefined) return s.params[param];
+  return def;
+}
+
+function renderCard(sc) {
+  const s = state[sc.key] || { enabled: false, params: {} };
+  const on = !!s.enabled;
+  const controls = sc.controls.map(c => {
+    const v = paramValue(sc.key, c.param, c.def);
+    if (c.type === "range")
+      return `<div class="row"><label>${c.label}</label>
+        <input type="range" min="${c.min}" max="${c.max}" step="${c.step}" value="${v}"
+          oninput="this.nextElementSibling.textContent=(+this.value).toFixed(2)"
+          onchange="onParam('${sc.key}','${c.param}', parseFloat(this.value))" />
+        <span class="val">${(+v).toFixed(2)}</span></div>`;
+    if (c.type === "number")
+      return `<div class="row"><label>${c.label}</label>
+        <input type="number" min="${c.min}" max="${c.max}" value="${v}" style="width:90px"
+          onchange="onParam('${sc.key}','${c.param}', parseInt(this.value))" /></div>`;
+    if (c.type === "select")
+      return `<div class="row"><label>${c.label}</label>
+        <select onchange="onParam('${sc.key}','${c.param}', this.value)">
+          ${c.options.map(o => `<option ${o===v?"selected":""}>${o}</option>`).join("")}
+        </select></div>`;
+    return "";
+  }).join("");
+
+  return `<div class="card ${on?"on":""}">
+    <div class="card-head">
+      <span class="title">${sc.title}</span>
+      <span class="tag ${sc.group==="primary"?"primary":""}">${sc.tag}</span>
+      <label class="toggle switch">
+        <input type="checkbox" ${on?"checked":""} onchange="onToggle('${sc.key}', this.checked)" />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="desc">${sc.desc}</div>
+    <div class="finding"><b>Warden:</b> ${sc.finding}</div>
+    ${controls}
+  </div>`;
+}
+
+function collectParams(key) {
+  const sc = SCENARIOS.find(s => s.key === key);
+  const params = {};
+  sc.controls.forEach(c => { params[c.param] = paramValue(key, c.param, c.def); });
+  // Carry the fixed entity_history flags.
+  if (key === "entity_history") { params.suspend_can = true; params.inflate_history = true; }
+  return params;
+}
+
+async function onToggle(key, enabled) {
+  await api(`/api/scenarios/${key}`, "POST", { enabled, params: collectParams(key) });
+  refresh();
+}
+async function onParam(key, param, value) {
+  const s = state[key] || { enabled: false, params: {} };
+  const params = collectParams(key);
+  params[param] = value;
+  await api(`/api/scenarios/${key}`, "POST", { enabled: !!s.enabled, params });
+  refresh();
+}
+async function resetAll() { await api("/api/reset", "POST"); refresh(); }
+async function terminate() {
+  const count = parseInt(document.getElementById("term-count").value) || 1;
+  await api("/api/actions/terminate-dispatch", "POST", { count });
+}
+async function workerAction(queue, action) { await api(`/api/workers/${queue}/${action}`, "POST"); refresh(); }
+
+function renderWorkers(workers) {
+  document.getElementById("workers").innerHTML = QUEUES.map(q => {
+    const st = (workers && workers[q]) || "unknown";
+    const running = st === "running";
+    return `<div class="worker">
+      <span class="dot ${running?"":"stopped"}"></span>
+      <span class="pill">${q} <span class="val">${st}</span></span>
+      <button class="act" onclick="workerAction('${q}','${running?"stop":"start"}')">${running?"kill":"start"}</button>
+      <button class="act" onclick="workerAction('${q}','restart')">restart</button>
+    </div>`;
+  }).join("");
+}
+
+function render() {
+  document.getElementById("primary").innerHTML =
+    SCENARIOS.filter(s => s.group === "primary").map(renderCard).join("");
+  document.getElementById("secondary").innerHTML =
+    SCENARIOS.filter(s => s.group === "secondary").map(renderCard).join("");
+  const active = Object.entries(state).filter(([k,v]) => v && v.enabled && !k.startsWith("_")).length;
+  document.getElementById("active").textContent = active;
+}
+
+async function refresh() {
+  try {
+    const health = await api("/api/health");
+    state = health.scenarios || {};
+    document.getElementById("aps").textContent = health.estimated_aps ?? "--";
+    render();
+    renderWorkers(health.workers);
+  } catch (e) { /* backend warming up */ }
+}
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

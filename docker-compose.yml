@@ -1,0 +1,85 @@
+# One command up/down for the whole workload:
+#   docker compose up -d --build      # bring everything up
+#   docker compose down               # tear everything down
+#
+# Every worker queue is its own container so the dashboard can kill/restart one
+# team's queue (S7) without touching the rest. The dashboard controls the worker
+# containers over the mounted docker socket.
+#
+# Connection to the OBSERVED Temporal Cloud namespace comes from .env (see
+# .env.example). No Temporal server runs here; the workload connects to Cloud.
+
+name: warden-demo
+
+# Shared definition for every service (same image, same env, self-healing).
+x-app: &app
+  image: warden-demo-workload:latest
+  build: .
+  env_file: .env
+  restart: unless-stopped
+
+services:
+  worker-order:
+    <<: *app
+    container_name: warden-worker-order
+    command: python -m workers.run_worker order-tq
+
+  worker-dispatch:
+    <<: *app
+    container_name: warden-worker-dispatch
+    command: python -m workers.run_worker dispatch-tq
+
+  worker-courier:
+    <<: *app
+    container_name: warden-worker-courier
+    command: python -m workers.run_worker courier-tq
+
+  worker-batch:
+    <<: *app
+    container_name: warden-worker-batch
+    command: python -m workers.run_worker batch-tq
+
+  worker-settlement:
+    <<: *app
+    container_name: warden-worker-settlement
+    command: python -m workers.run_worker settlement-tq
+
+  worker-menu:
+    <<: *app
+    container_name: warden-worker-menu
+    command: python -m workers.run_worker menu-tq
+
+  worker-control:
+    <<: *app
+    container_name: warden-worker-control
+    command: python -m workers.run_worker control-tq
+
+  generator:
+    <<: *app
+    container_name: warden-generator
+    command: python generator.py
+    depends_on:
+      - worker-control
+      - worker-order
+      - worker-dispatch
+      - worker-courier
+      - worker-batch
+      - worker-settlement
+      - worker-menu
+
+  dashboard:
+    <<: *app
+    container_name: warden-dashboard
+    command: python -m dashboard.app
+    environment:
+      # Bind on all interfaces inside the container so the published port works,
+      # and control worker CONTAINERS (not subprocesses) over the docker socket.
+      DASHBOARD_HOST: 0.0.0.0
+      SUPERVISOR_MODE: docker
+    ports:
+      - "8800:8800"
+    volumes:
+      # Lets the dashboard stop/start/restart the worker containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - worker-control
