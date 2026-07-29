@@ -31,6 +31,7 @@ class Config:
     order_start_jitter: float
     courier_fleet_size: int
     control_cache_refresh_sec: float
+    order_stage_tracking: bool
 
 
 def load_config() -> Config:
@@ -48,4 +49,14 @@ def load_config() -> Config:
         order_start_jitter=float(os.environ.get("ORDER_START_JITTER", "0.2")),
         courier_fleet_size=int(os.environ.get("COURIER_FLEET_SIZE", "10")),
         control_cache_refresh_sec=float(os.environ.get("CONTROL_CACHE_REFRESH_SEC", "2.5")),
+        # Mid-run OrderStage upserts cost 3 billable actions per order. On by
+        # default (the visibility demo wants them); turn off to reclaim the APS.
+        order_stage_tracking=_flag("ORDER_STAGE_TRACKING", True),
     )
+
+
+def _flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")

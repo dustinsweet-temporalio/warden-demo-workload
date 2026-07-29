@@ -28,6 +28,7 @@ from common.constants import (
     CONTROL_TQ,
     CONTROL_WORKFLOW_ID,
 )
+from common.search_attributes import ORDER_STAGE_UPSERT_ACTIONS
 from control.schema import RETRY_STORM, FANOUT_STORM, default_scenarios
 from control.workflow import DemoControlWorkflow
 
@@ -168,7 +169,12 @@ async def health():
         scenarios = default_scenarios()
 
     # Rough APS estimate for presenter confidence (not a metric read).
-    order_aps = config.order_start_rate_per_sec * 10.0
+    # An order is ~10 actions, plus one per mid-run OrderStage upsert and one for
+    # its settlement's payout upsert when stage tracking is on.
+    actions_per_order = 10.0
+    if config.order_stage_tracking:
+        actions_per_order += ORDER_STAGE_UPSERT_ACTIONS + 1
+    order_aps = config.order_start_rate_per_sec * actions_per_order
     baseline_other = 3.7
     est = order_aps + baseline_other
     if scenarios.get(RETRY_STORM, {}).get("enabled"):

@@ -26,6 +26,17 @@ class OrderInput:
     slow_validate: bool = False
     # S5 (workflow variant): sleep past a short workflow execution timeout.
     force_timeout: bool = False
+    # Order shape, generated at start time and stamped into start-time search
+    # attributes (free) so the visibility demo has business dimensions to slice.
+    priority_tier: str = "standard"
+    order_value_usd: float = 0.0
+    surge_pricing: bool = False
+    dietary_tags: list = field(default_factory=list)  # list[str]
+    delivery_notes: str = ""
+    # Whether the order upserts OrderStage as the saga advances. Each upsert is
+    # one billable action, so this is an explicit, presenter-controlled cost
+    # (ORDER_STAGE_TRACKING). Immutable start-time input keeps it replay-safe.
+    track_stages: bool = True
 
 
 @dataclass
@@ -72,6 +83,7 @@ class CourierState:
     region: str
     assignments: int = 0
     pings: int = 0
+    vehicle_type: str = "bike"
 
 
 @dataclass
@@ -92,6 +104,11 @@ class CandidateInput:
 @dataclass
 class SettlementInput:
     order_id: str
+    # Carried from the parent order so the settlement child can be tagged with
+    # the same visibility dimensions at start time.
+    region: str = ""
+    restaurant_id: str = ""
+    courier_id: str = ""
 
 
 @dataclass

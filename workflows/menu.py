@@ -8,9 +8,11 @@ from __future__ import annotations
 from datetime import timedelta
 
 from temporalio import workflow
+from temporalio.common import SearchAttributePair, TypedSearchAttributes
 
 with workflow.unsafe.imports_passed_through():
     from activities.menu import fetch_menu, publish_menu, refresh_menu
+    from common import search_attributes as sa
     from common.models import MenuSyncState
 
 
@@ -29,4 +31,10 @@ class MenuSyncWorkflow:
         )
         state.runs += 1
         await workflow.sleep(timedelta(minutes=3))
-        workflow.continue_as_new(args=[state])
+        # Re-stamp RestaurantId so every run of the sync job stays queryable.
+        workflow.continue_as_new(
+            args=[state],
+            search_attributes=TypedSearchAttributes(
+                [SearchAttributePair(sa.RESTAURANT_ID, state.restaurant_id)]
+            ),
+        )

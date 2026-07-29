@@ -14,14 +14,26 @@ import asyncio
 from datetime import timedelta
 
 from temporalio import workflow
+from temporalio.common import SearchAttributePair, TypedSearchAttributes
 
 with workflow.unsafe.imports_passed_through():
     from activities.batch import tiny_eval
+    from common import search_attributes as sa
     from common.constants import BATCH_TQ, candidate_id
     from common.models import BatchInput, CandidateInput
 
 # Healthy fan-out is small and bounded regardless of the requested children.
-_NORMAL_MAX_CHILDREN = 8
+# Public so the generator can stamp the effective FanoutSize at start time.
+NORMAL_MAX_CHILDREN = 8
+
+
+def effective_fanout(inp: BatchInput) -> int:
+    """How many children this batch will actually start."""
+    if inp.mode == "sequential_bloat":
+        return 0
+    if inp.mode == "fanout_storm":
+        return inp.children
+    return min(inp.children, NORMAL_MAX_CHILDREN)
 
 
 @workflow.defn
@@ -39,13 +51,22 @@ class BatchAssignmentWorkflow:
             return {"mode": "sequential_bloat", "iterations": inp.iterations}
 
         # normal or fanout_storm: fan out to children and aggregate scores.
-        n = inp.children if inp.mode == "fanout_storm" else min(inp.children, _NORMAL_MAX_CHILDREN)
+        n = effective_fanout(inp)
+        # Children inherit the batch's mode and size as start-time attributes, so
+        # one List Filter counts every workflow a storm created (free).
+        child_attrs = TypedSearchAttributes(
+            [
+                SearchAttributePair(sa.BATCH_MODE, inp.mode),
+                SearchAttributePair(sa.FANOUT_SIZE, n),
+            ]
+        )
         tasks = [
             workflow.execute_child_workflow(
                 "CandidateEvalWorkflow",
                 CandidateInput(batch_id=inp.batch_id, candidate_id=f"c{i}"),
                 id=candidate_id(inp.batch_id, i),
                 task_queue=BATCH_TQ,
+                search_attributes=child_attrs,
             )
             for i in range(n)
         ]

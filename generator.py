@@ -22,8 +22,10 @@ import uuid
 from datetime import timedelta
 
 from temporalio.client import Client
+from temporalio.common import SearchAttributePair, TypedSearchAttributes
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from common import search_attributes as sa
 from common.config import Config, load_config
 from common.connection import connect
 from common.constants import (
@@ -54,7 +56,7 @@ from control.schema import (
     WORKFLOW_FAILURE,
 )
 from control.workflow import DemoControlWorkflow
-from workflows.batch import BatchAssignmentWorkflow
+from workflows.batch import BatchAssignmentWorkflow, effective_fanout
 from workflows.courier import CourierShiftWorkflow
 from workflows.dispatch import DispatchWorkflow
 from workflows.menu import MenuSyncWorkflow
@@ -62,6 +64,21 @@ from workflows.order import OrderWorkflow
 
 RESTAURANTS = [f"rest-{i}" for i in range(1, 21)]
 MENU_RESTAURANTS = RESTAURANTS[:4]
+
+# Order shape used only to give the visibility demo realistic dimensions to
+# slice. Weighted so "premium" stays a minority (a query for it returns a
+# genuinely narrower slice).
+PRIORITY_TIERS = ["standard"] * 6 + ["plus"] * 3 + ["premium"]
+DIETARY_TAGS = ["vegan", "vegetarian", "gluten-free", "halal", "contains-nuts", "spicy"]
+VEHICLE_TYPES = ["bike"] * 4 + ["scooter"] * 3 + ["car"] * 3
+DELIVERY_NOTES = [
+    "leave at door",
+    "call on arrival",
+    "gate code at building entrance",
+    "hand to customer",
+    "apartment buzzer is broken, text instead",
+    "",
+]
 
 
 class Generator:
@@ -110,6 +127,13 @@ class Generator:
                     DispatchState(region=region),
                     id=dispatch_id(region),
                     task_queue=DISPATCH_TQ,
+                    search_attributes=TypedSearchAttributes(
+                        [
+                            SearchAttributePair(sa.DELIVERY_REGION, region),
+                            SearchAttributePair(sa.FLEET_STATUS, "healthy"),
+                            SearchAttributePair(sa.PENDING_ORDER_COUNT, 0),
+                        ]
+                    ),
                 )
                 print(f"[generator] started dispatch-{region}", flush=True)
             except WorkflowAlreadyStartedError:
@@ -122,6 +146,9 @@ class Generator:
                     MenuSyncState(restaurant_id=restaurant),
                     id=f"menu-{restaurant}",
                     task_queue=MENU_TQ,
+                    search_attributes=TypedSearchAttributes(
+                        [SearchAttributePair(sa.RESTAURANT_ID, restaurant)]
+                    ),
                 )
             except WorkflowAlreadyStartedError:
                 pass
@@ -146,18 +173,27 @@ class Generator:
                 # A short execution timeout the order will exceed => workflow_timeout.
                 kwargs["execution_timeout"] = timedelta(seconds=10)
 
+            inp = OrderInput(
+                order_id=order_id,
+                region=region,
+                restaurant_id=restaurant,
+                fail_at_restaurant=fail_at_restaurant,
+                force_timeout=force_timeout,
+                priority_tier=random.choice(PRIORITY_TIERS),
+                order_value_usd=round(random.uniform(12.0, 145.0), 2),
+                surge_pricing=random.random() < 0.25,
+                dietary_tags=random.sample(DIETARY_TAGS, random.randint(0, 2)),
+                delivery_notes=random.choice(DELIVERY_NOTES),
+                track_stages=self.config.order_stage_tracking,
+            )
+
             try:
                 await self.client.start_workflow(
                     OrderWorkflow.run,
-                    OrderInput(
-                        order_id=order_id,
-                        region=region,
-                        restaurant_id=restaurant,
-                        fail_at_restaurant=fail_at_restaurant,
-                        force_timeout=force_timeout,
-                    ),
+                    inp,
                     id=f"order-{order_id}",
                     task_queue=ORDER_TQ,
+                    search_attributes=_order_attributes(inp),
                     **kwargs,
                 )
                 self.orders_started += 1
@@ -201,12 +237,20 @@ class Generator:
         self._courier_seq += 1
         cid = f"{self._courier_seq}-{uuid.uuid4().hex[:6]}"
         region = random.choice(REGIONS)
+        vehicle = random.choice(VEHICLE_TYPES)
         try:
             await self.client.start_workflow(
                 CourierShiftWorkflow.run,
-                CourierState(courier_id=cid, region=region),
+                CourierState(courier_id=cid, region=region, vehicle_type=vehicle),
                 id=courier_wf_id(cid),
                 task_queue=COURIER_TQ,
+                search_attributes=TypedSearchAttributes(
+                    [
+                        SearchAttributePair(sa.COURIER_ID, cid),
+                        SearchAttributePair(sa.DELIVERY_REGION, region),
+                        SearchAttributePair(sa.VEHICLE_TYPE, vehicle),
+                    ]
+                ),
             )
             self._couriers.append(cid)
         except WorkflowAlreadyStartedError:
@@ -238,6 +282,12 @@ class Generator:
                     inp,
                     id=f"batch-{batch_id}",
                     task_queue=BATCH_TQ,
+                    search_attributes=TypedSearchAttributes(
+                        [
+                            SearchAttributePair(sa.BATCH_MODE, inp.mode),
+                            SearchAttributePair(sa.FANOUT_SIZE, effective_fanout(inp)),
+                        ]
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"[generator] batch start failed: {exc}", flush=True)
@@ -296,6 +346,31 @@ class Generator:
             self.control_loop(),
             self.entity_keepalive_loop(),
         )
+
+
+def _order_attributes(inp: OrderInput) -> TypedSearchAttributes:
+    """Start-time search attributes for one order.
+
+    Everything knowable before the first workflow task goes here: start-time
+    search attributes are not billable actions, so this whole set is free. The
+    order upserts only OrderStage (and CourierId) later, when the saga actually
+    tells us something new.
+    """
+    pairs = [
+        SearchAttributePair(sa.DELIVERY_REGION, inp.region),
+        SearchAttributePair(sa.RESTAURANT_ID, inp.restaurant_id),
+        SearchAttributePair(sa.ORDER_STAGE, sa.STAGE_PLACED),
+        SearchAttributePair(sa.PRIORITY_TIER, inp.priority_tier),
+        SearchAttributePair(sa.ORDER_VALUE_USD, inp.order_value_usd),
+        SearchAttributePair(sa.IS_SURGE_PRICING, inp.surge_pricing),
+    ]
+    # Only stamp the list/text attributes when they carry something; an empty
+    # value is indistinguishable from unset in a List Filter anyway.
+    if inp.dietary_tags:
+        pairs.append(SearchAttributePair(sa.DIETARY_TAGS, list(inp.dietary_tags)))
+    if inp.delivery_notes:
+        pairs.append(SearchAttributePair(sa.DELIVERY_NOTES, inp.delivery_notes))
+    return TypedSearchAttributes(pairs)
 
 
 async def main() -> None:
