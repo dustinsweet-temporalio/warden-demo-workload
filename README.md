@@ -1,14 +1,41 @@
 # Warden demo workload
 
+> # ⚠️ STOP — THIS COSTS REAL MONEY. NOT INTENDED FOR GENERAL USE. ⚠️
+>
+> **This is a load-generating workload for testing and demos only. It is designed
+> to run continuously and it will bill you accordingly.**
+>
+> | | |
+> |---|---|
+> | Sustained rate | **~10 Actions per second** (~11-13 with search attribute stage tracking on) |
+> | If left running for a month | **~25-30 million billable Actions** |
+> | Rough cost at list Pay-As-You-Go rates | **~$1,000-1,300 per month**, before storage and plan fees |
+>
+> There is no built-in stop, budget guard, or time limit. It generates load for as
+> long as the containers are up, whether or not anyone is watching.
+>
+> **Do not run this unless you know what you are doing**, and specifically:
+>
+> - Run it in a **dedicated demo namespace**, never a production one.
+> - Know who pays for that namespace, and that they expect this.
+> - **`docker compose down` the moment you are done.** Not "later".
+> - Do not leave it running overnight, over a weekend, or between demos.
+>
+> See [Temporal Cloud pricing](https://docs.temporal.io/cloud/pricing) for current
+> rates and [Actions](https://docs.temporal.io/cloud/actions) for what counts as a
+> billable Action. Your actual bill depends on your account's volume tier and plan.
+>
+
 A Delivery Service-flavored Temporal application that runs a fleet of canonical
 food-delivery workflows continuously against a Temporal Cloud namespace, plus an
 operator control surface (web dashboard) that injects and reverses fault
 scenarios on demand.
 
 It is the substrate for a Warden demo. By default the fleet sits at a calm,
-green baseline (about 8-10 APS). Under operator control it exhibits exactly the
-failure modes a platform team fears, each producing a specific, visible Warden
-finding. Every scenario is controllable and reversible from the dashboard.
+green baseline (about 11-13 APS, or 8-10 with search attribute stage tracking
+off). Under operator control it exhibits exactly the failure modes a platform
+team fears, each producing a specific, visible Warden finding. Every scenario is
+controllable and reversible from the dashboard.
 
 Warden itself is not in this repo. This workload runs in the namespace Warden
 watches; Warden observes it entirely from the outside (metrics endpoint plus
@@ -104,6 +131,13 @@ cp .env.example .env        # then fill in your Cloud connection
 docker compose up -d --build   # bring EVERYTHING up
 docker compose down            # tear EVERYTHING down
 ```
+
+`--build` is not optional after a code change: without it, compose reuses the last
+image and you will be demoing stale code.
+
+**The clock starts at `up` and stops at `down`.** Nothing else pauses billing —
+closing the dashboard, walking away, or stopping the dashboard container all leave
+the generator and workers producing Actions. See the warning at the top.
 
 Then open http://127.0.0.1:8800.
 
